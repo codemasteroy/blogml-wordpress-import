@@ -45,13 +45,30 @@ class BlogML_Import {
 	var $posts;
 	var $posts_processed = array (); // Array of arrays. [[0] => XML fragment, [1] => New post ID]
     var $old_new_post_mapping = array (); // Key is old permalink URL, value is new permalink URL
+    var $url_remap = array ();
     var $authors = array ();
     var $categories = array ();
 	var $file;
 	var $id;
 	var $blogmlnames = array ();
 	var $newauthornames = array ();
-	var $j = -1;
+	var $j = 1;
+	var $old_blog_url = false;
+
+	/**
+	 * Decide what the maximum file size for downloaded attachments is.
+	 * Default is 0 (unlimited), can be filtered via import_attachment_size_limit
+	 *
+	 * @return int Maximum attachment file size to import
+	 */
+	function max_attachment_size() {
+		return apply_filters( 'import_attachment_size_limit', 0 );
+	}
+
+	// return the difference in length between two strings
+	function cmpr_strlen( $a, $b ) {
+		return strlen($b) - strlen($a);
+	}
 
 	function header() {
 		echo '<div class="wrap">';
@@ -144,6 +161,16 @@ class BlogML_Import {
 		$this->posts = $this->sXml->xpath("/blogml:blog/blogml:posts/blogml:post");
 	}
 
+	function get_url_from_post() {
+		if ( isset( $_POST['blog_url'] ) && !empty( $_POST['blog_url'] ) ) {
+			$this->old_blog_url = $_POST['blog_url'];
+
+			if ( preg_match( '/\/$/', $this->old_blog_url ) == 0 ) {
+				$this->old_blog_url = trailingslashit( $this->old_blog_url ); 
+			}
+		}
+	}
+
 	function get_authors_from_post() {
 		$formnames = array ();
 		$selectnames = array ();
@@ -171,14 +198,19 @@ class BlogML_Import {
 	}
 
 	function wp_authors_form() {
+		echo '<form action="?import=blogml&amp;step=2&amp;id=' . $this->id . '" method="post">';
 ?>
+<h2><?php _e('Previous Blog'); ?></h2>
+<label for="blogmlBlogUrl"><?php _e('URL:'); ?> </label>
+
+<input type="text" value="" name="blog_url" id="blogmlBlogUrl" size="50"> <br />
+
 <h2><?php _e('Assign Authors'); ?></h2>
 <p><?php _e('To make it easier for you to edit and save the imported posts and drafts, you may want to change the name of the author of the posts. For example, you may want to import all the entries as <code>admin</code>s entries.'); ?></p>
 <p><?php _e('If a new user is created by WordPress, the password will be set, by default, to "changeme". Quite suggestive, eh? ;)'); ?></p>
 	<?php
 
 		echo '<ol id="authors">';
-		echo '<form action="?import=blogml&amp;step=2&amp;id=' . $this->id . '" method="post">';
 		wp_nonce_field('import-blogml');
 		$j = -1;
 		foreach ($this->authors as $author) {
@@ -189,8 +221,9 @@ class BlogML_Import {
 		}
 
 		echo '<input type="submit" value="Submit">'.'<br/>';
-		echo '</form>';
 		echo '</ol>';
+
+		echo '</form>';
 
 	}
 
@@ -246,8 +279,18 @@ class BlogML_Import {
 		$numPosts = count($this->posts);
 		//Kavinda: Uncomment the next line to test the import with only 10 post.
 		//$numPosts = 10;
+		$pids = array();
 		for ($i = 0; $i < $numPosts; $i++) {
-			$this->process_post($this->posts[$i]);
+			$post_id = $this->process_post($this->posts[$i]);
+			if ($post_id) {
+				$pids[$i] = $post_id;
+			}
+		}
+
+		for ($i = 0; $i < $numPosts; $i++) {
+			if (isset($pids[$i])) {
+				// $this->process_attachments($pids[$i]);
+			}
 		}
 
 		echo '</ol>';
@@ -282,6 +325,109 @@ class BlogML_Import {
 		}
 
 		echo '<h3>'.sprintf(__('All done.').' <a href="%s">'.__('Have fun!').'</a>', get_option('home')).'</h3>';
+	}
+
+	function fetch_remote_file( $url, $post ) {
+		// extract the file name and extension from the url
+		$file_name = basename( $url );
+
+		// get placeholder file in the upload dir with a unique, sanitized filename
+		$upload = wp_upload_bits( $file_name, 0, '' );
+		if ( $upload['error'] )
+			return new WP_Error( 'upload_dir_error', $upload['error'] );
+
+		// fetch the remote url and write it to the placeholder file
+		$headers = wp_get_http( $url, $upload['file'] );
+
+		// request failed
+		if ( ! $headers ) {
+			@unlink( $upload['file'] );
+			return new WP_Error( 'import_file_error', __('Remote server did not respond', 'wordpress-importer') );
+		}
+
+		// make sure the fetch was successful
+		if ( $headers['response'] != '200' ) {
+			@unlink( $upload['file'] );
+			return new WP_Error( 'import_file_error', sprintf( __('Remote server returned error response %1$d %2$s', 'wordpress-importer'), esc_html($headers['response']), get_status_header_desc($headers['response']) ) );
+		}
+
+		$filesize = filesize( $upload['file'] );
+
+		if ( isset( $headers['content-length'] ) && $filesize != $headers['content-length'] ) {
+			@unlink( $upload['file'] );
+			return new WP_Error( 'import_file_error', __('Remote file is incorrect size', 'wordpress-importer') );
+		}
+
+		if ( 0 == $filesize ) {
+			@unlink( $upload['file'] );
+			return new WP_Error( 'import_file_error', __('Zero size file downloaded', 'wordpress-importer') );
+		}
+
+		$max_size = (int) $this->max_attachment_size();
+		if ( ! empty( $max_size ) && $filesize > $max_size ) {
+			@unlink( $upload['file'] );
+			return new WP_Error( 'import_file_error', sprintf(__('Remote file is too large, limit is %s', 'wordpress-importer'), size_format($max_size) ) );
+		}
+
+		// keep track of the old and new urls so we can substitute them later
+		$this->url_remap[$url] = $upload['url'];
+		// keep track of the destination if the remote url is redirected somewhere else
+		if ( isset($headers['x-final-location']) && $headers['x-final-location'] != $url )
+			$this->url_remap[$headers['x-final-location']] = $upload['url'];
+
+		return $upload;
+	}
+
+
+	/*
+		1. Get post
+		2. Look for images
+		3. Import the images
+		4. Attach to post
+		5. Update URLs
+	*/
+	function process_attachments($parent_post_id) {
+		$parent_post = get_post($parent_post_id);
+		
+		$old_url_escaped = preg_quote($this->old_blog_url, '/');
+
+		if (preg_match_all('/("|\')('.$old_url_escaped.'|\/)([^\'"]*\.[^\'"]*)("|\')/', $parent_post->post_content, $matches)) {
+			if (isset($matches[3]) && is_array($matches[3]) && count($matches[3]) > 1) {
+				foreach ($matches[3] as $match) {
+					$url = "{$this->old_blog_url}{$match}";
+
+					if (isset($this->url_remap[$url]))
+						continue;
+					
+					$upload = $this->fetch_remote_file( $url, $post );
+					if ( is_wp_error( $upload ) )
+						return $upload;
+
+					$post = array();
+					if ( $info = wp_check_filetype( $upload['file'] ) )
+						$post['post_mime_type'] = $info['type'];
+					else
+						return new WP_Error( 'attachment_processing_error', __('Invalid file type', 'wordpress-importer') );
+
+					$post['guid'] = $upload['url'];
+
+					// as per wp-admin/includes/upload.php
+					$post_id = wp_insert_attachment( $post, $upload['file'], $parent_post_id );
+					wp_update_attachment_metadata( $post_id, wp_generate_attachment_metadata( $post_id, $upload['file'] ) );
+
+					// remap resized image URLs, works by stripping the extension and remapping the URL stub.
+					if ( preg_match( '!^image/!', $info['type'] ) ) {
+						$parts = pathinfo( $url );
+						$name = basename( $parts['basename'], ".{$parts['extension']}" ); // PATHINFO_FILENAME in PHP 5.2
+
+						$parts_new = pathinfo( $upload['url'] );
+						$name_new = basename( $parts_new['basename'], ".{$parts_new['extension']}" );
+
+						$this->url_remap[$parts['dirname'] . '/' . $name] = $parts_new['dirname'] . '/' . $name_new;
+					}
+				}
+			}
+		}
 	}
   
 	function process_post($post) {
@@ -379,6 +525,10 @@ class BlogML_Import {
 				wp_set_object_terms($post_id, $tags, 'post_tag', true );
 			}	
 			printf(' '.__('(%s tags)'), $tag_count);
+
+			if ($this->old_blog_url) {
+				$this->process_attachments($post_id);
+			}
 		}
 		// Now for comments
 		$commentsNodes = $post->xpath("blogml:comments/blogml:comment");
@@ -419,8 +569,26 @@ class BlogML_Import {
 			printf(' '.__('(%s comments)'), $num_comments);
 			
 		echo '</li>';
+		return $post_id;
 
 	}
+
+	/**
+	 * Use stored mapping information to update old attachment URLs
+	 */
+	function backfill_attachment_urls() {
+		global $wpdb;
+		// make sure we do the longest urls first, in case one is a substring of another
+		uksort( $this->url_remap, array(&$this, 'cmpr_strlen') );
+
+		foreach ( $this->url_remap as $from_url => $to_url ) {
+			// remap urls in post_content
+			$wpdb->query( $wpdb->prepare("UPDATE {$wpdb->posts} SET post_content = REPLACE(post_content, %s, %s)", $from_url, $to_url) );
+			// remap enclosure urls
+			$result = $wpdb->query( $wpdb->prepare("UPDATE {$wpdb->postmeta} SET meta_value = REPLACE(meta_value, %s, %s) WHERE meta_key='enclosure'", $from_url, $to_url) );
+		}
+	}
+
 	
 	function getBoolean($string_value)
 	{
@@ -463,9 +631,11 @@ class BlogML_Import {
 
 		$this->file = get_attached_file($this->id);
 		$this->get_authors_from_post();
+		$this->get_url_from_post();
 		$this->parse_blogml();
 		$this->process_categories();
 		$this->process_posts();
+		$this->backfill_attachment_urls();
 	}
 
 	function dispatch() {
