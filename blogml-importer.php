@@ -398,7 +398,7 @@ class BlogML_Import {
 
 					if (isset($this->url_remap[$url]))
 						continue;
-					
+
 					$upload = $this->fetch_remote_file( $url, $post );
 					if ( is_wp_error( $upload ) )
 						return $upload;
@@ -584,6 +584,14 @@ class BlogML_Import {
 		foreach ( $this->url_remap as $from_url => $to_url ) {
 			// remap urls in post_content
 			$wpdb->query( $wpdb->prepare("UPDATE {$wpdb->posts} SET post_content = REPLACE(post_content, %s, %s)", $from_url, $to_url) );
+			
+			$relative_from_url = str_replace( $this->old_blog_url, "", $from_url);
+			$relative_from_url_attr = '="/'.$relative_from_url;
+			$wpdb->query( $wpdb->prepare("UPDATE {$wpdb->posts} SET post_content = REPLACE(post_content, %s, %s)", $relative_from_url_attr, '="'.$to_url) );
+			
+			$relative_from_url_attr = '=\'/'.$relative_from_url;
+			$wpdb->query( $wpdb->prepare("UPDATE {$wpdb->posts} SET post_content = REPLACE(post_content, %s, %s)", $relative_from_url_attr, '=\''.$to_url) );
+			
 			// remap enclosure urls
 			$result = $wpdb->query( $wpdb->prepare("UPDATE {$wpdb->postmeta} SET meta_value = REPLACE(meta_value, %s, %s) WHERE meta_key='enclosure'", $from_url, $to_url) );
 		}
