@@ -392,7 +392,7 @@ class BlogML_Import {
 		$old_url_escaped = preg_quote($this->old_blog_url, '/');
 
 		if (preg_match_all('/("|\')('.$old_url_escaped.'|\/)([^\'"]*\.[^\'"]*)("|\')/', $parent_post->post_content, $matches)) {
-			if (isset($matches[3]) && is_array($matches[3]) && count($matches[3]) > 1) {
+			if (isset($matches[3]) && is_array($matches[3]) && count($matches[3]) > 0) {
 				foreach ($matches[3] as $match) {
 					$url = "{$this->old_blog_url}{$match}";
 
